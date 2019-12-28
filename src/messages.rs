@@ -1,11 +1,11 @@
 use serde::{Serialize, Deserialize};
 
-#[derive(Deserialize, Eq, PartialEq, Ord, PartialOrd, Hash, Clone)]
+#[derive(Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd, Hash, Clone, Debug)]
 pub struct ReceivingMessage {
     pub payload: ReceivingMessagePayload
 }
 
-#[derive(Deserialize, Eq, PartialEq, Ord, PartialOrd, Hash, Clone)]
+#[derive(Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd, Hash, Clone, Debug)]
 pub enum ReceivingMessagePayload {
     Drive {
         left: u8,
