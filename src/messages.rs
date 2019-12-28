@@ -13,7 +13,12 @@ pub enum ReceivingMessagePayload {
     }
 }
 
-#[derive(Serialize, Eq, PartialEq, Ord, PartialOrd, Hash, Clone)]
+#[derive(Serialize, Eq, PartialEq, Ord, PartialOrd, Hash, Clone, Debug)]
 pub struct SendingMessage {
+    pub payload: SendingMessagePayload
+}
 
+#[derive(Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd, Hash, Clone, Debug)]
+pub enum SendingMessagePayload {
+    Test(String)
 }
