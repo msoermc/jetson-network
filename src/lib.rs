@@ -11,10 +11,8 @@ use futures::StreamExt;
 
 mod messages;
 mod errors;
-mod handle;
 
 pub mod prelude {
-    pub use crate::handle::NetworkHandle;
     pub use crate::errors::{NetworkError, NetworkResult};
     pub use crate::messages::{SendingMessage, ReceivingMessage, ReceivingMessagePayload};
 }
