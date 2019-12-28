@@ -17,8 +17,9 @@ pub mod prelude {
     pub use crate::messages::{SendingMessage, ReceivingMessage, ReceivingMessagePayload};
 }
 
-pub async fn launch(sender: Sender<ReceivingMessage>, receive: Receiver<SendingMessage>) {
-    let addr: SocketAddr = "0.0.0.0:1776".to_socket_addrs().await.unwrap().next().unwrap();
+pub async fn launch(sender: Sender<ReceivingMessage>, receive: Receiver<SendingMessage>,
+                    address: &str) {
+    let addr: SocketAddr = address.to_socket_addrs().await.unwrap().next().unwrap();
     let listener: TcpListener = TcpListener::bind(&addr).await.unwrap();
 
     let streams = Arc::new(RwLock::new(Vec::with_capacity(10)));
