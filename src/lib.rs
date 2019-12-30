@@ -16,7 +16,6 @@ mod messages;
 mod errors;
 
 pub mod prelude {
-    pub use crate::errors::{NetworkError, NetworkResult};
     pub use crate::messages::{SendingMessage, ReceivingMessage, ReceivingMessagePayload, SendingMessagePayload};
 }
 
@@ -49,6 +48,8 @@ type ConnectionList = Arc<RwLock<Vec<Arc<Connection>>>>;
 
 /// Asynchronously launch the network
 pub async fn launch(sender: Sender<ReceivingMessage>, receive: Receiver<SendingMessage>, addr: &str) {
+    info!("Launching network");
+
     // parse the address
     let addr: SocketAddr = addr
         .to_socket_addrs()
@@ -70,18 +71,19 @@ pub async fn launch(sender: Sender<ReceivingMessage>, receive: Receiver<SendingM
     let streams: ConnectionList = Arc::new(RwLock::new(Vec::with_capacity(8)));
 
     // kick off the tasks for accepting connections and writing messages
-    task::spawn(process_streams(sender, listener, streams.clone()));
+    task::spawn(accept_connections(sender, listener, streams.clone()));
     task::spawn(process_writes(receive, streams));
 }
 
 /// Task for accepting oncoming connections
-async fn process_streams(sender: Sender<ReceivingMessage>,
-                         listener: TcpListener,
-                         streams: ConnectionList) {
+async fn accept_connections(sender: Sender<ReceivingMessage>, listener: TcpListener, streams: ConnectionList) {
     // accept a connection
     while let Ok((stream, _)) = listener.accept().await {
+        info!("Received new TCP connection");
         // try and convert the connection to a websocket
         if let Ok(ws) = accept_async(stream).await {
+            debug!("Successfully upgraded connection to a websocket");
+
             // split the duplex stream
             let (writer, reader) = ws.split();
 
@@ -93,9 +95,13 @@ async fn process_streams(sender: Sender<ReceivingMessage>,
 
             // store the connection
             streams.write().await.push(connection.clone());
+            trace!("Stored connection");
 
             // kick off a reader task
             task::spawn(process_reader(sender.clone(), connection));
+            trace!("Spawned reader for connection")
+        } else {
+            error!("Received tcp connection, but failed to upgrade to websocket")
         }
     }
 
@@ -119,7 +125,10 @@ async fn process_reader(sender: Sender<ReceivingMessage>, duplex: Arc<Connection
                     Ok(message_string) => {
                         // parse json
                         match serde_json::from_str(&message_string) {
-                            Ok(received) => sender.send(received).await,
+                            Ok(received) => {
+                                info!("Received: {:?}", received);
+                                sender.send(received).await
+                            },
                             Err(e) => error!("Received invalid message {:?}", e),
                         };
                     }
@@ -128,8 +137,9 @@ async fn process_reader(sender: Sender<ReceivingMessage>, duplex: Arc<Connection
                     }
                 }
             } else { // if we failed to get a message
+                info!("Network: Reader marking connection as inactive");
                 // mark the connection as inactive
-                duplex.is_active.store(false, Ordering::SeqCst);
+                duplex.is_active.store(false, Ordering::Relaxed);
                 return; // this connection is dead, nope out of here
             }
         } else {
@@ -144,6 +154,8 @@ async fn process_writes(receiver: Receiver<SendingMessage>, streams: ConnectionL
         // get next message from channel
         let next_message_result: Option<SendingMessage> = receiver.recv().await;
         if let Some(msg) = next_message_result {
+            debug!("Sending message {:?}", msg);
+
             // lock stream collection
             let streams_guard = streams.read().await;
 
@@ -152,7 +164,6 @@ async fn process_writes(receiver: Receiver<SendingMessage>, streams: ConnectionL
                 // check if the stream is active
                 if stream.is_active.load(Ordering::Relaxed) {
                     // parse json
-                    // this should never fail
                     let msg_string = serde_json::to_string(&msg)
                         .expect("Failed to convert item to json");
 
@@ -184,6 +195,7 @@ async fn delete_inactive_connection(streams: ConnectionList, id: usize) {
         if streams_guard.index(i).id == id {
             // yeet that boi
             streams_guard.remove(i);
+            debug!("Network: Removed inactive connection");
             break;
         }
     }
@@ -210,6 +222,7 @@ async fn process_sendoff(duplex: Arc<Connection>, msg: Message) {
 
     // mark the connection as inactive if the operation failed
     if !is_operation_successful {
+        debug!("Network writer marked connection as inactive");
         duplex.is_active.store(false, Ordering::SeqCst);
     }
 }
