@@ -10,7 +10,7 @@ use std::io::Write;
 async fn ping(sender: Sender<SendingMessage>) {
     loop {
         sender.send(SendingMessage { payload: SendingMessagePayload::Test("Hello".to_string()) }).await;
-        task::sleep(Duration::from_secs(1)).await;
+        task::sleep(Duration::from_secs(5)).await;
     }
 }
 

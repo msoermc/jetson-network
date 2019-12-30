@@ -8,15 +8,25 @@ use async_std::task;
 use futures::sink::SinkExt;
 use log::{info, warn, error, debug, trace};
 use futures::StreamExt;
-use std::time::Duration;
 use futures::stream::{SplitSink, SplitStream};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::ops::Index;
 
 mod messages;
 mod errors;
 
+pub mod prelude {
+    pub use crate::errors::{NetworkError, NetworkResult};
+    pub use crate::messages::{SendingMessage, ReceivingMessage, ReceivingMessagePayload, SendingMessagePayload};
+}
+
+pub const NEXT_CON_ID: AtomicUsize = AtomicUsize::new(0);
+
 struct DuplexStreamMutexPair<S, M> {
     pub writer: Mutex<SplitSink<S, M>>,
     pub reader: Mutex<SplitStream<S>>,
+    pub is_active: AtomicBool,
+    pub id: usize,
 }
 
 impl<S, M> DuplexStreamMutexPair<S, M> {
@@ -24,6 +34,8 @@ impl<S, M> DuplexStreamMutexPair<S, M> {
         Self {
             writer: Mutex::new(writer),
             reader: Mutex::new(reader),
+            is_active: AtomicBool::new(true),
+            id: NEXT_CON_ID.fetch_add(1, Ordering::AcqRel),
         }
     }
 }
@@ -32,7 +44,7 @@ type WebSocketStreamAggregator =
 Arc<
     RwLock<
         Vec<
-            RwLock<
+            Arc<
                 DuplexStreamMutexPair<
                     WebSocketStream<TcpStream>,
                     Message
@@ -42,71 +54,97 @@ Arc<
     >
 >;
 
-pub mod prelude {
-    pub use crate::errors::{NetworkError, NetworkResult};
-    pub use crate::messages::{SendingMessage, ReceivingMessage, ReceivingMessagePayload, SendingMessagePayload};
-}
 
 pub async fn launch(sender: Sender<ReceivingMessage>, receive: Receiver<SendingMessage>, addr: &str) {
     let addr: SocketAddr = addr.to_socket_addrs().await.unwrap().next().unwrap();
     let listener: TcpListener = TcpListener::bind(&addr).await.unwrap();
 
-    let streams: WebSocketStreamAggregator = Arc::new(RwLock::new(Vec::with_capacity(10)));
+    let streams: WebSocketStreamAggregator = Arc::new(RwLock::new(Vec::with_capacity(8)));
 
-    task::spawn(process_streams(listener, streams.clone()));
-    task::spawn(process_reads(sender, streams.clone()));
+    task::spawn(process_streams(sender, listener, streams.clone()));
     task::spawn(process_writes(receive, streams));
 }
 
-/// Asynchronously reads
-async fn process_reads(sender: Sender<ReceivingMessage>, streams: WebSocketStreamAggregator) {
+async fn process_reader(sender: Sender<ReceivingMessage>,
+                        duplex: Arc<DuplexStreamMutexPair<WebSocketStream<TcpStream>, Message>>) {
     loop {
-        let streams = streams.read().await;
-        for stream_rw_lock in streams.iter() {
-            debug!("R: R-Locking duplex");
-            let stream = stream_rw_lock.read().await;
-            debug!("R: Locking reader");
-            let mut reader = stream.reader.lock().await;
-
-            debug!("R: Checking for new message");
-            // TODO remove unwraps
-            // TODO make it so that a single unresponsive stream get's ignored
-            let message: Message = reader.next().await.unwrap().unwrap();
-            let message_string = message.into_text().unwrap();
-            match serde_json::from_str(&message_string) {
-                Ok(received) => sender.send(received).await,
-                Err(e) => error!("Received invalid message {:?}", e),
-            };
+        if duplex.is_active.load(Ordering::Relaxed) {
+            let mut reader = duplex.reader.lock().await;
+            if let Some(Ok(message)) = reader.next().await {
+                let message_string = message.into_text().unwrap();
+                match serde_json::from_str(&message_string) {
+                    Ok(received) => sender.send(received).await,
+                    Err(e) => error!("Received invalid message {:?}", e),
+                };
+            } else {
+                // let everyone know it's dead
+                duplex.is_active.store(false, Ordering::SeqCst);
+                return; // this connection is dead, nope out of here
+            }
+        } else {
+            return; // this connection is dead, nope out of here
         }
     }
 }
 
-/// Not currently working
+// TODO handle errors
 async fn process_writes(receiver: Receiver<SendingMessage>, streams: WebSocketStreamAggregator) {
     loop {
         let msg: SendingMessage = receiver.recv().await.expect("Channel hangup");
-        let streams = streams.read().await;
-        for stream_rw_lock in streams.iter() {
-            debug!("W: R-Locking duplex");
-            let stream = stream_rw_lock.read().await;
-            debug!("W: Locking writer");
-            let mut writer = stream.writer.lock().await;
-            let msg = Message::Text(serde_json::to_string(&msg).unwrap());
-            debug!("Sent: {:?}", msg);
-            writer.send(msg).await.unwrap();
-            writer.flush().await.unwrap();
+        let streams_guard = streams.read().await;
+        for stream in streams_guard.iter() {
+            if stream.is_active.load(Ordering::Relaxed) {
+                let msg_string = serde_json::to_string(&msg).expect("Failed to convert item to json");
+                let msg = Message::Text(msg_string);
+                task::spawn(process_sendoff(stream.clone(), msg));
+            } else {
+                task::spawn(delete_inactive_connection(streams.clone(), stream.id));
+            }
         }
     }
 }
 
-async fn process_streams(listener: TcpListener, streams: WebSocketStreamAggregator) {
+async fn delete_inactive_connection(streams: WebSocketStreamAggregator, id: usize) {
+    let mut streams_guard = streams.write().await;
+
+    for i in 0..(streams_guard.len()) {
+        if streams_guard.index(i).id == id {
+            streams_guard.remove(i);
+            break;
+        }
+    }
+}
+
+async fn process_sendoff(duplex: Arc<DuplexStreamMutexPair<WebSocketStream<TcpStream>, Message>>,
+                         msg: Message) {
+    let mut writer = duplex.writer.lock().await;
+    let mut ok =  true;
+
+    let send = writer.send(msg).await.is_ok();
+
+    ok &= send;
+
+    if send {
+        ok &= writer.flush().await.is_ok();
+    }
+
+    if !ok {
+        // let everyone know it's dead
+        duplex.is_active.store(false, Ordering::SeqCst);
+    }
+}
+
+async fn process_streams(sender: Sender<ReceivingMessage>,
+                         listener: TcpListener,
+                         streams: WebSocketStreamAggregator) {
     while let Ok((stream, _)) = listener.accept().await {
         if let Ok(ws) = accept_async(stream).await {
             let (writer, reader) = ws.split();
             let duplex = DuplexStreamMutexPair::new(writer, reader);
-            debug!("S: W-Locking streams");
-            streams.write().await.push(RwLock::new(duplex));
-            debug!("S: Added new stream");
+            let connection = Arc::new(duplex);
+
+            streams.write().await.push(connection.clone());
+            task::spawn(process_reader(sender.clone(), connection));
         }
     }
 }
