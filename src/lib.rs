@@ -13,13 +13,13 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::ops::Index;
 
 mod messages;
-mod errors;
 
 pub mod prelude {
     pub use crate::messages::{SendingMessage, ReceivingMessage, ReceivingMessagePayload, SendingMessagePayload};
 }
 
-const NEXT_CON_ID: AtomicUsize = AtomicUsize::new(0);
+// don't make this `const`, will result in unexpected behavior
+static NEXT_CON_ID: AtomicUsize = AtomicUsize::new(0);
 
 struct Connection<S = WebSocketStream<TcpStream>, M = Message> {
     pub writer: Mutex<SplitSink<S, M>>,
