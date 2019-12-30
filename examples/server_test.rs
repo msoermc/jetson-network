@@ -4,7 +4,7 @@ use jetson_network::launch;
 use jetson_network::prelude::{SendingMessage, SendingMessagePayload};
 use std::time::Duration;
 use log::LevelFilter;
-use std::io::Write;
+use tracing_log::LogTracer;
 // {"payload":{"Drive":{"left":5,"right":5}}}
 
 async fn ping(sender: Sender<SendingMessage>) {
@@ -15,15 +15,7 @@ async fn ping(sender: Sender<SendingMessage>) {
 }
 
 fn main() {
-    pretty_env_logger::formatted_builder()
-        .filter_level(LevelFilter::Debug)
-        .format(|buf, record| {
-            writeln!(buf, "[{}]\tModule: {}\tLine: {}\t{}",
-                     record.level(),
-                     record.module_path().expect("Couldn't find module path"),
-                     record.line().expect("Couldn't find line"),
-                     record.args())
-        }).init();
+    LogTracer::init_with_filter(LevelFilter::Debug).expect("Failed to init logger");
 
     let (sr, rr) = channel(100);
     let (ss, rs) = channel(100);
